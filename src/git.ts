@@ -184,6 +184,28 @@ export function applyPatch(dir: string, patchPath: string): void {
   }
 }
 
+/**
+ * The patch that turns `from` into `to`, for this project only and never
+ * thisisfine's own dir (the check, the ledger, other proofs). `--binary`
+ * so a fix that touched an image still applies; `--full-index` so a binary
+ * hunk names whole blob ids.
+ */
+export function diffBinary(root: string, from: string, to: string): string {
+  return gitRaw(root, ["diff", "--binary", "--full-index", "--no-renames", "--no-color", from, to, "--", ".", `:(exclude)${STATE_DIR}`]);
+}
+
+/**
+ * Apply a stored removal patch exactly or not at all: no `--3way`, no
+ * fuzz. A patch that only applies with help is a patch for other code,
+ * and "the check fails on that" proves nothing about today's.
+ */
+export function applyRemoval(dir: string, patchPath: string): boolean {
+  const patch = resolve(patchPath);
+  if (tryGit(dir, ["apply", "--check", "--whitespace=nowarn", patch]) === null) return false;
+  git(dir, ["apply", "--whitespace=nowarn", patch]);
+  return true;
+}
+
 /** The id git gives these bytes as a blob: sha1 over a "blob <size>\0" header and the content. */
 export function blobOf(bytes: Buffer): string {
   return createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");

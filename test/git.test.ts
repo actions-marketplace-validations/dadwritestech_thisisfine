@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { addWorktree, applyPatch, blobOf, changedPaths, changedSince, defaultBase, fileAtRef, footprint, prepareWorktree, removeWorktree, repoRoot, resolveRef, snapshotCommit, treeBlobs, treeId } from "../src/git.ts";
+import { addWorktree, applyPatch, applyRemoval, blobOf, changedPaths, changedSince, defaultBase, diffBinary, fileAtRef, footprint, prepareWorktree, removeWorktree, repoRoot, resolveRef, snapshotCommit, treeBlobs, treeId } from "../src/git.ts";
 import { commitAll, initRepo, put, sh, tempDir } from "./helpers.ts";
 
 function repo(): string {
@@ -138,4 +138,58 @@ test("fileAtRef is null for a file the commit doesn't have, and throws for a ref
   const root = repo();
   assert.equal(fileAtRef(root, "HEAD", ".thisisfine/promises.jsonl"), null);
   assert.throws(() => fileAtRef(root, "no-such-branch", ".thisisfine/promises.jsonl"), /no-such-branch/);
+});
+
+test("diffBinary takes the app back to the base and leaves .thisisfine/ out", () => {
+  const root = repo();
+  put(root, "app.js", "v2\n");
+  put(root, ".thisisfine/checks/1-x.spec.ts", "check");
+  put(root, ".thisisfine/ledger.jsonl", "{}\n");
+  const patch = diffBinary(root, treeId(root), resolveRef(root, "HEAD")!);
+  assert.match(patch, /^diff --git a\/app\.js b\/app\.js$/m);
+  assert.match(patch, /^-v2$/m);
+  assert.match(patch, /^\+v1$/m);
+  assert.doesNotMatch(patch, /\.thisisfine/);
+});
+
+test("a removal patch that changes a binary file applies cleanly to an unchanged tree", () => {
+  const root = repo();
+  writeFileSync(join(root, "logo.png"), Buffer.from([0, 1, 2, 3, 0, 255, 254]));
+  commitAll(root, "logo");
+  writeFileSync(join(root, "logo.png"), Buffer.from([0, 9, 9, 9, 0, 255, 254, 7]));
+  put(root, "app.js", "v2\n");
+  const patch = diffBinary(root, treeId(root), resolveRef(root, "HEAD")!);
+  assert.match(patch, /GIT binary patch/);
+  const file = join(tempDir(), "removal.patch");
+  writeFileSync(file, patch);
+  const dir = join(tempDir(), "wt");
+  addWorktree(root, snapshotCommit(root), dir);
+  try {
+    assert.equal(applyRemoval(dir, file), true);
+    assert.equal(readFileSync(join(dir, "app.js"), "utf8"), "v1\n");
+    assert.deepEqual([...readFileSync(join(dir, "logo.png"))], [0, 1, 2, 3, 0, 255, 254]);
+  } finally {
+    removeWorktree(root, dir);
+  }
+});
+
+test("applyRemoval refuses a patch that no longer applies, and changes nothing", () => {
+  const root = repo();
+  put(root, "app.js", "v2\n");
+  put(root, "other.js", "a\n");
+  commitAll(root, "v2");
+  put(root, "other.js", "b\n");
+  put(root, "app.js", "v3\n");
+  const patch = diffBinary(root, treeId(root), resolveRef(root, "HEAD")!);
+  const file = join(tempDir(), "removal.patch");
+  writeFileSync(file, patch);
+  put(root, "app.js", "moved on\n");
+  const dir = join(tempDir(), "wt");
+  addWorktree(root, snapshotCommit(root), dir);
+  try {
+    assert.equal(applyRemoval(dir, file), false);
+    assert.equal(readFileSync(join(dir, "other.js"), "utf8"), "b\n", "no partial apply");
+  } finally {
+    removeWorktree(root, dir);
+  }
 });

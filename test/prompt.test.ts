@@ -81,3 +81,21 @@ test("a y with nothing pending is just a message", () => {
   assert.deepEqual(d.append, []);
   assert.equal(d.systemMessage, "");
 });
+
+test("the removal patch is re-hashed at y: swapped or deleted, the lock is refused; untouched, it locks", () => {
+  const PATCH = ".thisisfine/proofs/p1.patch";
+  const proof = {
+    proven: true, reason: "", now: { screenshot: null },
+    without: { method: "base" as const, ref: "HEAD", note: null, booted: true, failed: true, message: "", screenshot: null, removal: { file: PATCH, hash: "1111111111111111", lines: 2 } }
+  };
+  const hashes = (patch: string) => (f: string) => (f === PATCH ? patch : "abcdabcdabcdabcd");
+  for (const [what, patch] of [["swapped for a no-op", "2222222222222222"], ["deleted", "missing"]]) {
+    const d = decidePrompt([proposal({ proof })], defaultState(), { ...base, prompt: "y", hashOf: hashes(patch!) });
+    assert.deepEqual(d.append.map((r) => r.kind), ["dismiss"], what);
+    assert.match(d.systemMessage, /#1's removal patch changed after it was proposed; ask .+ to propose it again/, what);
+  }
+  const ok = decidePrompt([proposal({ proof })], defaultState(), { ...base, prompt: "y", hashOf: hashes("1111111111111111") });
+  assert.deepEqual(ok.append.map((r) => r.kind), ["lock"]);
+  assert.deepEqual((ok.append[0] as LockRecord).proof?.without.removal, proof.without.removal);
+  assert.equal(checkSignature(ok.append[0] as LockRecord, keyring), "valid", "the patch hash is under the signature");
+});

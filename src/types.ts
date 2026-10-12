@@ -57,6 +57,14 @@ export interface Proof {
     message: string;
     screenshot: string | null;
     evidence?: string | null;
+    /** The base `ref` resolved to a commit, for people reading the ledger. */
+    sha?: string | null;
+    /**
+     * The patch that takes this behaviour out of the app, stored so
+     * `reprove` can replay it on later code. Absent on older records and on
+     * unproven ones. `hash` is `fileHash` of the stored bytes.
+     */
+    removal?: { file: string; hash: string; lines: number };
   };
 }
 
