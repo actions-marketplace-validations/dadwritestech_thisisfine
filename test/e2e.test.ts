@@ -11,7 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { commitAll, initRepo, put, tempDir } from "./helpers.ts";
 
@@ -121,8 +121,15 @@ test("a shop, a badge, a yes, a refactor: thisisfine catches it", { skip: proces
   // 7c. A placeholder badge left in for a demo: invisible while the real badge exists, a static "2" when it doesn't.
   // The check file is untouched and still passes, but it no longer notices the badge going away.
   const placeholder = `if (!document.querySelector("[data-testid=cart-count]")) document.getElementById("cart-link").insertAdjacentHTML("beforeend", '<span data-testid="cart-count">2</span>');\n`;
+  // On a pull request, reprove only what the branch can have hollowed out: a change elsewhere skips #1, saying why.
+  put(root, "public/about.txt", "about us\n");
+  const skipped = run("05b-reprove-changed-elsewhere", ["reprove", "--changed", "HEAD"]);
+  assert.equal(skipped.code, 0, skipped.stdout + skipped.stderr);
+  assert.match(skipped.stdout, /Skipping #1: nothing changed since HEAD is in the code behind its fix/);
+  assert.doesNotMatch(skipped.stdout, /still proven/);
+  rmSync(join(root, "public/about.txt"));
   edit("public/app.js", "const cart = [];", `${placeholder}const cart = [];`);
-  const hollow = run("05b-reprove-hollow", ["reprove", "1"]);
+  const hollow = run("05b-reprove-hollow", ["reprove", "--changed", "HEAD"]);
   assert.equal(hollow.code, 1, hollow.stdout + hollow.stderr);
   assert.match(hollow.stdout, /✘ #1 hollow: passes with the fix removed/);
   assert.match(hollow.stdout, /propose --replaces 1/);

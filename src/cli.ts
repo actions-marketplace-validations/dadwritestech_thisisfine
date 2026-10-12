@@ -12,17 +12,18 @@ import { behaviourDiff } from "./diff.ts";
 import type { CheckReport } from "./diff.ts";
 import { decideStop } from "./gate.ts";
 import type { RunResult } from "./gate.ts";
-import { changedPaths, changedSince, fileAtRef, footprint, repoRoot, treeBlobs, treeId } from "./git.ts";
+import { changedPaths, changedSince, fileAtRef, footprint, repoRoot, resolveRef, treeBlobs, treeId } from "./git.ts";
 import { decideGuard } from "./guard.ts";
 import { fileHash } from "./hash.ts";
 import { integrityProblems, keyLabel } from "./integrity.ts";
 import { appendRecord, ledgerPath, parseLedger, readLedger } from "./ledger.ts";
 import { startApp } from "./launcher.ts";
-import { appendMirror, mirrorCheckContent, readMirror } from "./mirror.ts";
+import { appendMirror, mirrorCheckContent, mirrorRemovalContent, readMirror } from "./mirror.ts";
 import { decidePrompt, newProposalId } from "./prompt.ts";
 import { activePromises, foldPromises, nextNumber } from "./promises.ts";
+import type { PromiseState } from "./promises.ts";
 import { BUILD_TIMEOUT_MS, prove } from "./prove.ts";
-import { patchStats, wideWarning } from "./removal.ts";
+import { patchStats, touchedBy, wideWarning } from "./removal.ts";
 import { reprove, reproveExitCode, reproveText } from "./reprove.ts";
 import { findRoot } from "./root.ts";
 import { diffText, nestedContext, pendingMessage, proofLine, sessionContext, shortDate, sideEffectWarning, statusText } from "./render.ts";
@@ -57,8 +58,9 @@ Usage: thisisfine <command>
   verify [--strict]            audit signatures, check files, and the human's words;
                                --strict (for CI) also fails on locks no committed key can check
   restore                      put back exactly what the human confirmed
-  reprove [n...] [--report <file.json>]
+  reprove [n...] [--changed <ref>] [--report <file.json>]
                                audit: does each check still fail on today's code with only its fix removed?
+                               --changed: only the promises whose fix is in a file changed since <ref>
                                exits 1 on a hollow, stale, broken or tampered promise; changes nothing
 
 Hooks (run by Claude Code or the pi extension, not by hand): hook-session, hook-prompt, hook-guard, hook-stop
@@ -377,7 +379,7 @@ async function cmdPropose(v: Record<string, string | boolean | undefined>): Prom
   return 0;
 }
 
-async function cmdReprove(positionals: string[], reportPath: string | undefined): Promise<number> {
+async function cmdReprove(positionals: string[], reportPath: string | undefined, changedRef: string | undefined): Promise<number> {
   const root = requireRoot();
   const all = records(root);
   // The removal patch is trusted because its hash is signed: a ledger that fails integrity can't vouch for it.
@@ -389,10 +391,17 @@ async function cmdReprove(positionals: string[], reportPath: string | undefined)
   const active = activePromises(all);
   const wanted = positionals.map((n) => positiveInt(n, "promise number"));
   for (const n of wanted) if (!active.some((p) => p.number === n)) throw new UsageError(`there is no active promise #${n}`);
-  const promises = wanted.length ? active.filter((p) => wanted.includes(p.number)) : active;
+  if (wanted.length && changedRef !== undefined) throw new UsageError(`name promises or use --changed, not both`);
+  let promises = wanted.length ? active.filter((p) => wanted.includes(p.number)) : active;
   if (!promises.length) {
     out("No active promises to reprove.");
     return 0;
+  }
+  if (changedRef !== undefined) {
+    const scoped = scopeToChanges(root, promises, changedRef);
+    if (scoped.note) out(scoped.note);
+    promises = scoped.promises;
+    if (!promises.length) return 0;
   }
   pruneRuns(root);
   const stamped = stamp("reprove");
@@ -407,6 +416,28 @@ async function cmdReprove(positionals: string[], reportPath: string | undefined)
   }
   out(reproveText(results));
   return reproveExitCode(results);
+}
+
+/**
+ * `reprove --changed <ref>`: on a pull request, reprove only what the
+ * branch can have hollowed out. Saying what was skipped, and why, is part of
+ * the answer: a skipped promise is not a proven one.
+ */
+function scopeToChanges(root: string, promises: PromiseState[], ref: string): { promises: PromiseState[]; note: string } {
+  const sha = resolveRef(root, ref);
+  if (!sha) throw new UsageError(`--changed ${ref}: no such commit here (fetch it first)`);
+  const changed = changedPaths(root, sha, treeId(root));
+  if (changed === null) return { promises, note: `Can't tell what changed since ${ref}, so reproving every promise.` };
+  const s = touchedBy(promises, changed, (p) => {
+    const removal = p.proof?.without.removal;
+    return removal ? readFileSync(join(root, removal.file), "utf8") : null;
+  });
+  const nums = (ps: PromiseState[]) => ps.map((p) => `#${p.number}`).join(", ");
+  const notes: string[] = [];
+  if (s.untouched.length) notes.push(`Skipping ${nums(s.untouched)}: nothing changed since ${ref} is in the code behind ${s.untouched.length === 1 ? "its fix" : "their fixes"}.`);
+  if (s.noPatch.length) notes.push(`Skipping ${nums(s.noPatch)}: locked before reprove existed, so there's no removal patch (run "thisisfine reprove" for the full list).`);
+  if (!s.touched.length) notes.push(`Nothing changed since ${ref} touches a promise's fix, so there is nothing to reprove.`);
+  return { promises: s.touched, note: notes.join("\n") };
 }
 
 function cmdStatus(): number {
@@ -595,6 +626,21 @@ function cmdRestore(): number {
     mkdirSync(dirname(abs), { recursive: true });
     writeFileSync(abs, content);
     out(`Restored ${p.check} (#${p.number})`);
+  }
+  for (const p of activePromises(fixed)) {
+    const removal = p.proof?.without.removal;
+    if (!removal) continue;
+    const abs = join(root, removal.file);
+    if (fileHash(abs) === removal.hash) continue;
+    const bytes = mirrorRemovalContent(root, removal.hash);
+    if (bytes === null) {
+      out(`✖ #${p.number}: no confirmed copy of ${removal.file} on this machine. Get it back from git history.`);
+      unrestorable++;
+      continue;
+    }
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, bytes);
+    out(`Restored ${removal.file} (#${p.number}'s removal patch)`);
   }
   out(unrestorable ? "Restore incomplete." : "Everything matches what the human confirmed.");
   return unrestorable ? 1 : 0;
@@ -800,7 +846,7 @@ export async function runCli(argv: string[]): Promise<number> {
         sentence: { type: "string" }, check: { type: "string" }, base: { type: "string" },
         sabotage: { type: "string" }, "sabotage-note": { type: "string" }, replaces: { type: "string" },
         reason: { type: "string" }, "no-install": { type: "boolean" }, strict: { type: "boolean" },
-        report: { type: "string" }, markdown: { type: "boolean" }
+        report: { type: "string" }, markdown: { type: "boolean" }, changed: { type: "string" }
       }
     });
     switch (command) {
@@ -812,7 +858,7 @@ export async function runCli(argv: string[]): Promise<number> {
       case "retire": return cmdRetire(positionals, v);
       case "verify": return cmdVerify(v.strict === true);
       case "restore": return cmdRestore();
-      case "reprove": return await cmdReprove(positionals, typeof v.report === "string" ? v.report : undefined);
+      case "reprove": return await cmdReprove(positionals, typeof v.report === "string" ? v.report : undefined, typeof v.changed === "string" ? v.changed : undefined);
       default:
         err(`thisisfine: unknown command "${command}"\n\n${USAGE}`);
         return 2;

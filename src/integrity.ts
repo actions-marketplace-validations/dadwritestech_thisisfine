@@ -10,7 +10,8 @@ export interface IntegrityInput {
   records: LedgerRecord[];
   mirror: SignedRecord[];
   keyring: Keyring;
-  hashOf: (check: string) => string;
+  /** Root-relative path → `fileHash` ("missing" for a missing file). */
+  hashOf: (rel: string) => string;
 }
 
 function isSigned(r: LedgerRecord): r is SignedRecord {
@@ -67,6 +68,13 @@ export function integrityProblems(i: IntegrityInput): string[] {
     const h = i.hashOf(p.check);
     if (h === "missing") problems.push(`#${p.number}'s check was deleted (${p.check})`);
     else if (h !== p.checkHash) problems.push(`#${p.number}'s check was changed after you confirmed it (${p.check})`);
+    // reprove replays this patch on trust, so it is as locked as the check
+    const removal = p.proof?.without.removal;
+    if (removal) {
+      const rh = i.hashOf(removal.file);
+      if (rh === "missing") problems.push(`#${p.number}'s removal patch was deleted (${removal.file})`);
+      else if (rh !== removal.hash) problems.push(`#${p.number}'s removal patch was changed after you confirmed it (${removal.file})`);
+    }
   }
 
   const present = new Set(i.records.filter(isSigned).map((r) => r.sig));

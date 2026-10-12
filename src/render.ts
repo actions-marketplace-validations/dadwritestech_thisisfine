@@ -214,7 +214,12 @@ export function statusText(records: LedgerRecord[]): string {
     return `  ${pad(`#${p.number}`, 5)}${pad(label, 13)}"${p.sentence}"\n  ${" ".repeat(18)}${when}`;
   });
   const pend = pending.map((p) => `  pending #${p.number} "${p.action === "retire" ? `retire: ${p.reason}` : p.sentence}" (reply y to confirm)`);
-  return [head, "", ...rows, ...pend].join("\n");
+  // an unproven promise never had a fix to remove; a proven one without a patch predates reprove
+  const blind = active.filter((p) => p.proof?.proven && !p.proof.without.removal);
+  const note = blind.length
+    ? ["", `  ${numbers(blind)} can't be reproved: ${blind.length === 1 ? "it was" : "they were"} locked before reprove existed. "thisisfine reprove" says how to fix that.`]
+    : [];
+  return [head, "", ...rows, ...pend, ...note].join("\n");
 }
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;

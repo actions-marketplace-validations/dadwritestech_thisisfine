@@ -1,7 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { integrityProblems } from "../src/integrity.ts";
-import { appendMirror, readMirror, mirrorCheckContent } from "../src/mirror.ts";
+import { appendMirror, readMirror, mirrorCheckContent, mirrorRemovalContent } from "../src/mirror.ts";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileHash } from "../src/hash.ts";
 import { randomBytes } from "node:crypto";
 import { hmacSign, keyIdOf, legacyKeyEntry, loadOrCreateSigner, publicKeyEntry, signRecord } from "../src/sign.ts";
 import type { Keyring, KnownKey } from "../src/sign.ts";
@@ -79,4 +82,36 @@ test("legacy HMAC locks from this machine still verify, and still detect edits",
   assert.match(integrityProblems({ records: [{ ...legacy, sentence: "x" }], mirror: [], ...ok, keyring }).join(), /#1.*signature/);
   const forgedRetire = signRecord(retire(), alice);
   assert.match(integrityProblems({ records: [legacy, forgedRetire], mirror: [legacy], ...ok, keyring: ring(legacyKeyEntry(key), aliceKey) }).join(), /#1 was retired/);
+});
+
+const withRemoval = signRecord(lock({
+  proof: {
+    proven: true, reason: "fails on HEAD~1", now: { screenshot: null },
+    without: { method: "base", ref: "HEAD~1", note: null, booted: true, failed: true, message: "", screenshot: null,
+      removal: { file: ".thisisfine/proofs/p1.patch", hash: "1234123412341234", lines: 4 } }
+  }
+}), mine);
+const hashes = (patch: string) => (rel: string) => (rel.endsWith(".patch") ? patch : "abcdabcdabcdabcd");
+
+test("a changed or deleted removal patch is reported, because reprove trusts it", () => {
+  assert.deepEqual(integrityProblems({ records: [withRemoval], mirror: [withRemoval], ...ok, hashOf: hashes("1234123412341234") }), []);
+  assert.match(integrityProblems({ records: [withRemoval], mirror: [], ...ok, hashOf: hashes("ffffffffffffffff") }).join(),
+    /#1's removal patch was changed after you confirmed it \(\.thisisfine\/proofs\/p1\.patch\)/);
+  assert.match(integrityProblems({ records: [withRemoval], mirror: [], ...ok, hashOf: hashes("missing") }).join(),
+    /#1's removal patch was deleted \(\.thisisfine\/proofs\/p1\.patch\)/);
+});
+
+test("the mirror keeps a lock's removal patch byte for byte, and only the confirmed bytes", () => {
+  const home = tempDir();
+  const root = tempDir();
+  const bytes = Buffer.from("diff --git a/app.js b/app.js\r\n-cart.push(x)\n\0binary");
+  mkdirSync(join(root, ".thisisfine/proofs"), { recursive: true });
+  writeFileSync(join(root, ".thisisfine/proofs/p1.patch"), bytes);
+  const rec = signRecord(lock({ proof: { ...withRemoval.proof!, without: { ...withRemoval.proof!.without,
+    removal: { file: ".thisisfine/proofs/p1.patch", hash: fileHash(join(root, ".thisisfine/proofs/p1.patch")), lines: 1 } } } }), mine);
+  appendMirror(root, rec, null, home);
+  assert.deepEqual(mirrorRemovalContent(root, rec.proof!.without.removal!.hash, home), bytes);
+  // a patch that no longer matches its signed hash is not worth keeping
+  appendMirror(root, withRemoval, null, home);
+  assert.equal(mirrorRemovalContent(root, "1234123412341234", home), null);
 });

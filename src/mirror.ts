@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileHash } from "./hash.ts";
 import { appendRecord, readLedger } from "./ledger.ts";
 import { homeDir } from "./sign.ts";
 import type { SignedRecord } from "./types.ts";
@@ -10,7 +11,8 @@ import type { SignedRecord } from "./types.ts";
  * repo. `git checkout .`, `git stash`, or a hand-deleted line can make a
  * lock vanish from the repo's ledger; it can't make it vanish from here.
  * Locked check files are kept too (by hash), so `thisisfine restore` can put
- * back exactly what the human confirmed.
+ * back exactly what the human confirmed, and so are removal patches (raw
+ * bytes: `git apply` needs them exact), because `reprove` trusts them.
  */
 export function projectId(root: string): string {
   const abs = resolve(root);
@@ -30,6 +32,11 @@ export function appendMirror(root: string, record: SignedRecord, checkContent: s
     mkdirSync(join(dir, "checks"), { recursive: true });
     writeFileSync(join(dir, "checks", `${record.checkHash}.spec.ts`), checkContent);
   }
+  const removal = record.kind === "lock" ? record.proof?.without.removal : undefined;
+  if (removal && fileHash(join(root, removal.file)) === removal.hash) {
+    mkdirSync(join(dir, "removals"), { recursive: true });
+    writeFileSync(join(dir, "removals", `${removal.hash}.patch`), readFileSync(join(root, removal.file)));
+  }
 }
 
 /** A corrupt mirror reads as empty rather than wedging every stop. */
@@ -45,4 +52,9 @@ export function readMirror(root: string, home: string = homeDir()): SignedRecord
 export function mirrorCheckContent(root: string, checkHash: string, home: string = homeDir()): string | null {
   const path = join(mirrorDir(root, home), "checks", `${checkHash}.spec.ts`);
   return existsSync(path) ? readFileSync(path, "utf8") : null;
+}
+
+export function mirrorRemovalContent(root: string, hash: string, home: string = homeDir()): Buffer | null {
+  const path = join(mirrorDir(root, home), "removals", `${hash}.patch`);
+  return existsSync(path) ? readFileSync(path) : null;
 }
