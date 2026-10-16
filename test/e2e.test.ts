@@ -11,7 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { commitAll, initRepo, put, tempDir } from "./helpers.ts";
 
@@ -106,6 +106,43 @@ test("a shop, a badge, a yes, a refactor: thisisfine catches it", { skip: proces
   // 7. The check is now out of the agent's reach.
   const guarded = hook("05-hook-guard-edit-check", "hook-guard", { tool_name: "Edit", tool_input: { file_path: join(root, CHECK), old_string: "2", new_string: "1" } });
   assert.equal(guarded.json().hookSpecificOutput?.permissionDecision, "deny", guarded.stdout);
+
+  // 7a. The lock kept the patch that takes the badge back out, under the signature.
+  const lockRec = readFileSync(join(root, ".thisisfine/promises.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)).find((r) => r.kind === "lock");
+  const removal = lockRec.proof.without.removal;
+  assert.match(removal.file, /^\.thisisfine\/proofs\/.+\.patch$/);
+  assert.match(readFileSync(join(root, removal.file), "utf8"), /^-.*cart-count.*textContent/m, "the patch removes the badge update");
+
+  // 7b. Reprove: with only the fix removed, the check still goes red.
+  const reproved = run("05a-reprove", ["reprove"]);
+  assert.equal(reproved.code, 0, reproved.stdout + reproved.stderr);
+  assert.match(reproved.stdout, /✔ #1 still proven: fails with the fix removed/);
+
+  // 7c. A placeholder badge left in for a demo: invisible while the real badge exists, a static "2" when it doesn't.
+  // The check file is untouched and still passes, but it no longer notices the badge going away.
+  const placeholder = `if (!document.querySelector("[data-testid=cart-count]")) document.getElementById("cart-link").insertAdjacentHTML("beforeend", '<span data-testid="cart-count">2</span>');\n`;
+  // On a pull request, reprove only what the branch can have hollowed out: a change elsewhere skips #1, saying why.
+  put(root, "public/about.txt", "about us\n");
+  const skipped = run("05b-reprove-changed-elsewhere", ["reprove", "--changed", "HEAD"]);
+  assert.equal(skipped.code, 0, skipped.stdout + skipped.stderr);
+  assert.match(skipped.stdout, /Skipping #1: nothing changed since HEAD is in the code behind its fix/);
+  assert.doesNotMatch(skipped.stdout, /still proven/);
+  rmSync(join(root, "public/about.txt"));
+  edit("public/app.js", "const cart = [];", `${placeholder}const cart = [];`);
+  const hollow = run("05b-reprove-hollow", ["reprove", "--changed", "HEAD"]);
+  assert.equal(hollow.code, 1, hollow.stdout + hollow.stderr);
+  assert.match(hollow.stdout, /✘ #1 hollow: passes with the fix removed/);
+  assert.match(hollow.stdout, /propose --replaces 1/);
+  edit("public/app.js", `${placeholder}const cart = [];`, "const cart = [];");
+
+  // 7d. The code under the fix moved: the patch no longer applies, and reprove says so instead of guessing.
+  const pushLine = `cart.push(button.closest("[data-product]").dataset.product);`;
+  edit("public/app.js", pushLine, `cart.push(button.closest("article").dataset.product);`);
+  const stale = run("05c-reprove-stale", ["reprove"]);
+  assert.equal(stale.code, 1, stale.stdout + stale.stderr);
+  assert.match(stale.stdout, /✘ #1 no longer applies/);
+  assert.match(stale.stdout, /--sabotage <patch>/);
+  edit("public/app.js", `cart.push(button.closest("article").dataset.product);`, pushLine);
 
   // 8. Weeks later: "tidy up the cart code". Distinct products instead of items.
   edit("public/app.js", "String(cart.length)", "String(new Set(cart).size)");

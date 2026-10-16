@@ -27,6 +27,9 @@ inputs:
   node-version:
     description: Node.js version; thisisfine needs 22.18 or newer.
     default: "22"
+  reprove:
+    description: Also run "thisisfine reprove", which checks that each promise's check still fails with only its fix removed, and add it to the comment. "true" reproves only the promises whose fix is in a file the pull request changed (every promise when there is no base); "all" reproves every promise. Off by default because it starts the app twice per promise.
+    default: "false"
 
 outputs:
   result:
@@ -72,6 +75,30 @@ runs:
         node "$TIF" check --report "$REPORT"
         echo "code=$?" >> "$GITHUB_OUTPUT"
 
+    - name: Reprove every promise
+      id: reprove
+      if: ${{ always() && (inputs.reprove == 'true' || inputs.reprove == 'all') }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        TIF: ${{ github.action_path }}/bin/thisisfine.mjs
+        OUT: ${{ runner.temp }}/thisisfine-reprove.md
+        BASE: ${{ inputs.base }}
+        SCOPE: ${{ inputs.reprove }}
+      run: |
+        set +e
+        args=()
+        if [ "$SCOPE" = "true" ] && [ -n "$BASE" ]; then
+          git cat-file -e "$BASE^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$BASE"
+          args=(--changed "$BASE")
+        fi
+        text=$(node "$TIF" reprove "${args[@]}" 2>&1)
+        code=$?
+        echo "$text"
+        printf '\n### Reprove\n\nDoes each check still fail on this code with only its fix removed?\n\n```\n%s\n```\n' "$text" > "$OUT"
+        cat "$OUT" >> "$GITHUB_STEP_SUMMARY"
+        echo "code=$code" >> "$GITHUB_OUTPUT"
+
     - name: Behaviour diff
       id: diff
       if: ${{ always() && inputs.base != '' }}
@@ -102,7 +129,9 @@ runs:
         REPO: ${{ github.repository }}
         PR: ${{ github.event.pull_request.number }}
         OUT: ${{ runner.temp }}/thisisfine-diff.md
+        REPROVE: ${{ runner.temp }}/thisisfine-reprove.md
       run: |
+        [ -f "$REPROVE" ] && cat "$REPROVE" >> "$OUT"
         marker='<!-- thisisfine-behaviour-diff -->'
         body="$marker"$'\n'"$(cat "$OUT")"
         id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq ".[] | select(.body | startswith(\"$marker\")) | .id" 2>/dev/null | tail -n 1 || true)
@@ -113,7 +142,7 @@ runs:
         fi || echo "::warning::thisisfine couldn't comment on the pull request (a fork's token is read-only). The diff is in the job summary."
 
     - name: Keep the screenshots
-      if: ${{ always() && steps.check.outputs.code != '0' }}
+      if: ${{ always() && (steps.check.outputs.code != '0' || (steps.reprove.outputs.code != '' && steps.reprove.outputs.code != '0')) }}
       uses: actions/upload-artifact@v4
       with:
         name: thisisfine-runs
@@ -127,12 +156,14 @@ runs:
       env:
         CHECK: ${{ steps.check.outputs.code }}
         DIFF: ${{ steps.diff.outputs.code }}
+        REPROVE: ${{ steps.reprove.outputs.code }}
       run: |
-        if [ "$CHECK" = "0" ] && { [ -z "$DIFF" ] || [ "$DIFF" = "0" ]; }; then
+        if [ "$CHECK" = "0" ] && { [ -z "$DIFF" ] || [ "$DIFF" = "0" ]; } && { [ -z "$REPROVE" ] || [ "$REPROVE" = "0" ]; }; then
           echo "result=pass" >> "$GITHUB_OUTPUT"
           exit 0
         fi
         echo "result=fail" >> "$GITHUB_OUTPUT"
         if [ "$CHECK" != "0" ]; then echo "::error::thisisfine: a promise is broken, or the promises couldn't be checked. See the step above."; fi
         if [ -n "$DIFF" ] && [ "$DIFF" != "0" ]; then echo "::error::thisisfine: this branch broke a promise or rewrote the ledger. See the behaviour diff."; fi
+        if [ -n "$REPROVE" ] && [ "$REPROVE" != "0" ]; then echo "::error::thisisfine: a check no longer proves its promise (hollow, or its fix can't be removed any more). See the Reprove step."; fi
         exit 1

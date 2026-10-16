@@ -68,4 +68,13 @@ test("the GitHub Action sets up what the checks need inside .thisisfine/, gates 
   assert.match(verdict, /steps\.check\.outputs\.code/);
   assert.match(verdict, /steps\.diff\.outputs\.code/);
   assert.match(verdict, /exit 1/);
+  // reprove is opt-in: it boots the app twice per promise
+  assert.match(action, /^  reprove:\n    description: .*\n    default: "false"$/m);
+  const step = action.slice(action.indexOf("- name: Reprove"), action.indexOf("- name: Behaviour diff"));
+  assert.ok(step.includes("if: ${{ always() && (inputs.reprove == 'true' || inputs.reprove == 'all') }}"), step);
+  assert.ok(step.includes(`node "$TIF" reprove "\${args[@]}"`), step);
+  // on a pull request, "true" reproves only what the branch touched; "all" is the full sweep
+  assert.ok(step.includes(`if [ "$SCOPE" = "true" ] && [ -n "$BASE" ]; then`), step);
+  assert.ok(step.includes(`args=(--changed "$BASE")`), step);
+  assert.match(verdict, /steps\.reprove\.outputs\.code/);
 });

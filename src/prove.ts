@@ -1,14 +1,16 @@
-import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { cliEnv, expandTokens, runBuild, venvPython } from "./boundary.ts";
 import type { BuildOptions } from "./boundary.ts";
 import { checkKind } from "./checks.ts";
 import * as gitOps from "./git.ts";
+import { fileHash } from "./hash.ts";
 import { startApp } from "./launcher.ts";
 import type { RunningApp, StartOptions } from "./launcher.ts";
 import { startEvidenceProxy } from "./proxy.ts";
 import type { EvidenceProxy } from "./proxy.ts";
+import { patchStats } from "./removal.ts";
 import { browserLaunchError, browserText } from "./render.ts";
 import { runChecks } from "./runners.ts";
 import type { RunOptions } from "./runner.ts";
@@ -27,9 +29,11 @@ export interface ProveDeps {
   applyPatch: (dir: string, patch: string) => void;
   removeWorktree: (root: string, dir: string) => void;
   tempDir: () => string;
+  treeId: (root: string) => string;
+  diffBinary: (root: string, from: string, to: string) => string;
 }
 
-const realDeps: ProveDeps = {
+export const proveDeps: ProveDeps = {
   runBuild, startApp, startProxy: startEvidenceProxy, runChecks, ...gitOps,
   tempDir: () => join(mkdtempSync(join(tmpdir(), "thisisfine-wt-")), "app")
 };
@@ -41,6 +45,8 @@ export interface ProveOptions {
   base?: string;
   sabotage?: { patch: string; note: string };
   runDir: string;
+  /** Where to store the removal patch if the proof holds: absolute, and root-relative for the record. */
+  removal?: { abs: string; rel: string };
   deps?: Partial<ProveDeps>;
 }
 
@@ -74,7 +80,7 @@ function recordsEvidence(root: string, check: string): boolean {
 
 const nonEmpty = (path: string) => existsSync(path) && statSync(path).size > 0;
 
-async function runOnce(d: ProveDeps, o: ProveOptions, cwd: string, label: string, confirm: boolean): Promise<Once> {
+export async function runOnce(d: Pick<ProveDeps, "runBuild" | "startApp" | "startProxy" | "runChecks">, o: ProveOptions, cwd: string, label: string, confirm: boolean): Promise<Once> {
   const dir = join(o.runDir, label);
   const failed = (built: boolean, bootError: string): Once => ({ built, booted: false, bootError, outcome: null, evidence: null });
   if (o.config.build) {
@@ -135,7 +141,7 @@ async function runOnce(d: ProveDeps, o: ProveOptions, cwd: string, label: string
  * two runs (a one-off failure is not proof). Only the first is recorded.
  */
 export async function prove(o: ProveOptions): Promise<Proof> {
-  const d: ProveDeps = { ...realDeps, ...o.deps };
+  const d: ProveDeps = { ...proveDeps, ...o.deps };
 
   const now = await runOnce(d, o, o.root, "now", false);
   if (!now.built) throw new Error(`The build failed on the current code, so nothing can be proven yet.\n${now.bootError}`);
@@ -169,18 +175,33 @@ export async function prove(o: ProveOptions): Promise<Proof> {
     sha = resolved;
   }
 
+  // Base: today's tree back to the base. Taken before anything runs in the worktree.
+  let removal = o.removal && method === "base" ? d.diffBinary(o.root, d.treeId(o.root), sha) : "";
   const dir = d.tempDir();
   try {
     d.addWorktree(o.root, sha, dir);
     d.prepareWorktree(o.root, dir, o.config.copy);
-    if (o.sabotage) d.applyPatch(dir, o.sabotage.patch);
+    if (o.sabotage) {
+      d.applyPatch(dir, o.sabotage.patch);
+      // Sabotage: what the patch actually did, filtered by git, before a build can add to the tree.
+      if (o.removal) {
+        removal = d.diffBinary(o.root, sha, d.treeId(dir));
+        if (!removal) throw new Error("the sabotage patch only changes files under .thisisfine/, so it can't remove the behaviour from the app");
+      }
+    }
     const where = method === "sabotage" ? "with the sabotage patch" : `on ${ref}`;
     const w = await runOnce(d, o, dir, "without", true);
     const without = {
       method, ref, note: o.sabotage?.note ?? null, booted: w.booted,
       failed: w.outcome?.status === "failed", message: w.outcome?.message ?? w.bootError, screenshot: w.outcome?.screenshot ?? null,
-      evidence: w.evidence
+      evidence: w.evidence, ...(method === "base" ? { sha } : {})
     };
+    const proven = w.built && w.booted && without.failed;
+    if (proven && o.removal && removal) {
+      mkdirSync(dirname(o.removal.abs), { recursive: true });
+      writeFileSync(o.removal.abs, removal);
+      Object.assign(without, { removal: { file: o.removal.rel, hash: fileHash(o.removal.abs), lines: patchStats(removal).lines } });
+    }
     if (!w.built) return proof(without, false, `it doesn't build ${where}, and a crash proves nothing (try --sabotage with a smaller change)`);
     if (!w.booted) {
       return proof(without, false, `the app doesn't start ${where}, and a crash proves nothing about the check (try --sabotage with a smaller change)`);

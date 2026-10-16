@@ -2,9 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { prove } from "../src/prove.ts";
 import type { ProveDeps } from "../src/prove.ts";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DEFAULTS } from "../src/config.ts";
+import { fileHash } from "../src/hash.ts";
 import { tempDir } from "./helpers.ts";
 import type { CheckOutcome } from "../src/types.ts";
 
@@ -17,7 +18,7 @@ const config = { start: "node server.js", ...DEFAULTS };
  * proof worktree is anything else. `nowStatus` / `withoutStatus` say how the
  * check behaves in each; `withoutBoots: false` makes the worktree app crash.
  */
-function deps(o: { nowStatus?: CheckOutcome["status"]; nowMessage?: string; withoutStatus?: CheckOutcome["status"]; withoutAgain?: CheckOutcome["status"]; withoutBoots?: boolean; base?: string | null; builds?: { now?: boolean; without?: boolean } }) {
+function deps(o: { nowStatus?: CheckOutcome["status"]; nowMessage?: string; withoutStatus?: CheckOutcome["status"]; withoutAgain?: CheckOutcome["status"]; withoutBoots?: boolean; base?: string | null; builds?: { now?: boolean; without?: boolean }; patch?: string }) {
   const calls: string[] = [];
   let withoutRuns = 0;
   const d: ProveDeps = {
@@ -49,12 +50,16 @@ function deps(o: { nowStatus?: CheckOutcome["status"]; nowMessage?: string; with
     prepareWorktree: () => void calls.push("prepare"),
     applyPatch: (_d, p) => void calls.push(`patch:${p}`),
     removeWorktree: () => void calls.push("remove"),
-    tempDir: () => "/tmp/wt"
+    tempDir: () => "/tmp/wt",
+    treeId: (dir) => (calls.push(`tree:${dir}`), dir === ROOT ? "tree-now" : "tree-wt"),
+    diffBinary: (_r, from, to) => (calls.push(`diff:${from}->${to}`), o.patch ?? REMOVAL)
   };
   return { d, calls };
 }
 
-const run = (o: Parameters<typeof deps>[0], extra: { base?: string; sabotage?: { patch: string; note: string } } = {}) => {
+const REMOVAL = "diff --git a/app.js b/app.js\n--- a/app.js\n+++ b/app.js\n@@ -1 +1 @@\n-badge\n+nothing\n";
+
+const run = (o: Parameters<typeof deps>[0], extra: { base?: string; sabotage?: { patch: string; note: string }; removal?: { abs: string; rel: string } } = {}) => {
   const { d, calls } = deps(o);
   return { calls, result: prove({ root: ROOT, config, check: CHECK, runDir: "/runs/x", deps: d, ...extra }) };
 };
@@ -210,4 +215,39 @@ test("start gets {python} and {app} too, so a stdlib app runs on the venv in eit
   await prove({ root: ROOT, config: { start: `"{python}" {app}/app.py --port {port}`, ...DEFAULTS }, check: CHECK, runDir: "/runs/x", deps: d });
   assert.match(starts[0]!, /^"\/proj\/\.thisisfine\/\.venv\/(Scripts\/python\.exe|bin\/python)" \/proj\/app\.py --port \{port\}$/);
   assert.match(starts[1]!, /\/tmp\/wt\/app\.py --port \{port\}$/);
+});
+
+const removalAt = () => ({ abs: join(tempDir(), "proofs", "p1.patch"), rel: ".thisisfine/proofs/p1.patch" });
+
+test("a proven base proof stores the patch from today's tree back to the base, and signs its hash", async () => {
+  const removal = removalAt();
+  const { result, calls } = run({}, { removal });
+  const proof = await result;
+  assert.ok(calls.indexOf("diff:tree-now->sha-of-HEAD~1") >= 0, calls.join(" "));
+  assert.equal(readFileSync(removal.abs, "utf8"), REMOVAL);
+  assert.deepEqual(proof.without.removal, { file: removal.rel, hash: fileHash(removal.abs), lines: 2 });
+  assert.equal(proof.without.sha, "sha-of-HEAD~1");
+});
+
+test("an unproven proof writes no removal patch", async () => {
+  const removal = removalAt();
+  const proof = await run({ withoutStatus: "passed" }, { removal }).result;
+  assert.equal(proof.proven, false);
+  assert.equal(proof.without.removal, undefined);
+  assert.equal(existsSync(removal.abs), false);
+});
+
+test("a sabotage proof stores what the patch did to the worktree, filtered, not the patch file", async () => {
+  const removal = removalAt();
+  const { result, calls } = run({}, { removal, sabotage: { patch: "/p/sab.patch", note: "drop badge" } });
+  const proof = await result;
+  const patched = calls.indexOf("patch:/p/sab.patch");
+  const diffed = calls.indexOf("diff:snap->tree-wt");
+  assert.ok(patched >= 0 && diffed > patched, calls.join(" "));
+  assert.equal(proof.without.removal?.file, removal.rel);
+  assert.equal(proof.without.sha, undefined);
+});
+
+test("a sabotage patch that only touches .thisisfine/ removes nothing, so it's refused", async () => {
+  await assert.rejects(run({ patch: "" }, { removal: removalAt(), sabotage: { patch: "/p/sab.patch", note: "x" } }).result, /only changes files under \.thisisfine/);
 });

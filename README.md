@@ -123,6 +123,10 @@ Not everything you say "perfect" to is on a web page. A promise can be about an 
 | An HTTP API, in Python | `.thisisfine/checks/4-expired-token.py` | pytest, in thisisfine's own venv |
 | A CLI, in Go | `.thisisfine/checks/5-dry-run/check_test.go` | `go test`, in thisisfine's own module |
 
+<p align="center">
+  <img src="docs/img/demo-api.gif" alt="Demo, recorded from a real end-to-end run of the Python API example. You report that expired tokens still get into GET /me; Claude adds the expiry check and asks thisisfine to prove it with a patch that undoes the fix. thisisfine shows the evidence: with the fix, GET /me returns 401 'token expired'; without it, 200 with alice's account. You reply 'y' and promise #1 is locked. Weeks later a 'tidy up the auth code' request deletes the expiry check; Claude tries to stop and is blocked with '🔥 This is NOT fine', assert 200 == 401. Claude puts the check back and the turn ends with '☕ This is fine. 1/1 promises kept.'" width="100%">
+</p>
+
 JS/TS projects can promise API and CLI behaviour from a `.spec.ts` too, through the `request` and `run` fixtures. Whatever the language, the check is still black-box: it calls your API over HTTP or runs your CLI as a process, and a check that imports your code is refused. `init` detects Next.js, Vite, npm scripts, a package `bin`, Go's `cmd/<name>`, Django, Flask and FastAPI. `.thisisfine/config.json` has up to three commands: `start` (a server), `cli` (what checks run), and `build` (runs before either, in both the real tree and the proof's).
 
 A check that drives no browser has no screenshot, so thisisfine records what it sent and what came back instead, and shows you both sides before you say yes. This is the [Python API example](examples/tiny-api-py), from the [end-to-end test](test/e2e-api-cli.test.ts):
@@ -213,6 +217,16 @@ See [integrations/pi](integrations/pi/README.md) and [integrations/codex](integr
 
 Three slash commands: `/promise <sentence>`, `/promises` (list them), `/retire <n> <why>`.
 
+### What it runs, and what it sends
+
+- **The hooks run on your machine:** `node bin/thisisfine.mjs` from the plugin folder. There's no telemetry, and thisisfine has no server of its own to talk to.
+- **Downloads happen once, at setup** (the first `/promise`, or `thisisfine init`), and only into `.thisisfine/`: `@playwright/test` from the npm registry and Chromium through Playwright's installer for a web app, and pytest and requests from PyPI for Python, all at pinned versions. Go checks use your own `go` toolchain and need no modules.
+- **Your app stays local.** Proofs and checks start it on a free localhost port. API and CLI checks go through a recorder on 127.0.0.1, so the evidence can show what was sent and what came back. It keeps no headers.
+- **Files:** it writes inside `.thisisfine/` in your repo, plus your signing key in `~/.thisisfine/` (or `$THISISFINE_HOME`). The guard hook stops Claude from touching that key folder.
+- **The GitHub Action**, if you add it, posts one pull request comment using the token you give it.
+
+The full [privacy page](https://dadwritestech.github.io/thisisfine/privacy.html) also covers what the records keep.
+
 ## For vibecoders
 
 You don't need to know what a test is. You say "perfect" when something works, and Claude asks if you want to lock it in. From then on, if Claude breaks it, Claude finds out before you do, and has to fix it before it's allowed to say it's done. The messages are in plain English and quote what you said.
@@ -233,6 +247,7 @@ You don't need to know what a test is. You say "perfect" when something works, a
 - **Agent-written tests encode whatever the code does, bugs included.** Promises encode what a human looked at and agreed to. That's the one piece of ground truth in AI-assisted coding, and today it gets thrown away with the chat.
 - **`thisisfine verify`** audits every lock: the signature and which key made it, the check file's hash, and whether Claude Code's own transcript shows a person (not a tool) typing those exact words.
 - **Verifiable by teammates and CI.** Locks are signed with Ed25519. The private key stays in `~/.thisisfine/`; the public key is written to `.thisisfine/keys/<you>.pub` the first time you lock something. Commit it, and `thisisfine verify --strict` checks every lock on any machine, without any private key. `--strict` also fails on a lock that no committed key can check, which is what CI wants.
+- **`thisisfine reprove`** asks of every promise: does its check still fail on *today's* code with only its fix removed? When a promise locks, thisisfine keeps the patch that takes the behaviour back out (`.thisisfine/proofs/`, its hash under the signature). Reprove replays it in a throwaway worktree. A check that still passes is **hollow**: the file hasn't changed, but the code around it moved and it no longer tests the behaviour. A patch that no longer applies cleanly is reported as such, never merged with fuzz. Reprove only reports. It exits 1 on a hollow, stale, broken or tampered promise, and the fix goes through a new `propose --replaces <n>` that a person says yes to. Locks made before reprove existed say so, with the command to make them reprovable. `reprove --changed origin/main` reproves only the promises whose fix lives in a file the branch changed, and names the ones it skipped. The removal patches are locked like the checks: deleting or editing one blocks the stop, and `thisisfine restore` puts back the exact bytes.
 - **Review `.thisisfine/keys/` like code.** A key in that folder vouches for every lock it signs, so whoever can add a key there can add promises. The agent can't write there, but a person can. Put the folder under `CODEOWNERS` and treat a new key in a PR the way you'd treat a new deploy credential.
 
 ## In CI
@@ -280,6 +295,8 @@ The job fails when a promise is broken, when a locked check was edited, or when 
 
 **Signatures in CI:** each lock is signed with a private key that never leaves the machine where the human said yes, and the matching public key is written to `.thisisfine/keys/` for you to commit. CI checks every new confirmation against those committed keys: a forged or edited one fails the diff. A confirmation signed with a key that isn't committed yet gets a note under the summary instead of a failure. Run `thisisfine verify --strict` if you'd rather fail on those too.
 
+Set `reprove: true` to also run `thisisfine reprove` and add a **Reprove** section to the comment. On a pull request it reproves only the promises whose fix is in a file the PR changed, so the cost follows the size of the change; `reprove: all` reproves every promise (a nightly job, say). It's off by default because it starts your app twice per promise it reproves.
+
 The same two commands work locally, before you push:
 
 ```bash
@@ -299,7 +316,7 @@ thisisfine can't stop an agent that is determined to cheat. It makes cheating lo
 - **Older locks stay per machine.** Locks made before Ed25519 signing are HMAC-signed with `~/.thisisfine/key`. They still verify on the machine that made them, and anywhere else `verify` says no committed key can check them (a failure under `--strict`). To make one checkable everywhere, retire it and lock it again.
 - **The transcript check is local.** Claude Code's transcript stays on the machine where you typed "y", so a teammate's `verify` checks the signature and the check file, not the transcript.
 - **Claude Code, Codex and pi; web apps, HTTP APIs and CLIs.** pi works through [an extension](integrations/pi/README.md) and Codex through [four hooks](integrations/codex/README.md), each with one weaker guarantee: their session files can't prove a person typed the "y". Codex's Windows sandbox also sometimes won't start the browser for `propose`. Other agents (Cursor), libraries tested by import, background workers, and mobile or desktop UIs are out of scope for now. Checks are in JS/TS, Python or Go.
-- **It's only as good as the check.** A promise proves the check can fail when the behaviour is gone. It doesn't prove the check covers everything you had in mind. That's why the sentence is short, and why a person has to say yes.
+- **It's only as good as the check.** A promise proves the check can fail when the behaviour is gone. It doesn't prove the check covers everything you had in mind. That's why the sentence is short, and why a person has to say yes. And it's proven once, at lock time: run `thisisfine reprove` now and then to catch a check that has gone hollow since.
 - **Your app runs in your folder.** If a check clicks Save, it really saves, before every stop. `propose` names any project file the app wrote while the check ran, so you can point `start` at a scratch copy before you say yes. (We learned this the hard way: on a real app, a theme check rewrote `config.json`, and that saved setting later made the check pass with the feature broken.)
 
 ## FAQ
@@ -346,6 +363,8 @@ The demo GIF at the top is filmed from that run: every line of thisisfine output
 ```bash
 npm run demo
 ```
+
+The API demo in [APIs and CLIs](#apis-and-clis) is filmed the same way, from the Python API run (`npm run demo:api`, needs Python 3.9+).
 
 ## License
 

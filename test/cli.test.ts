@@ -140,6 +140,33 @@ test("restore brings back a lock that git checkout erased", () => {
   assert.equal(readFileSync(ledger, "utf8").trim().split("\n").length, 2);
 });
 
+test("a deleted removal patch blocks the stop, and restore puts back the exact bytes", () => {
+  const root = tempDir();
+  const home = join(tempDir(), "home");
+  const PATCH = ".thisisfine/proofs/p1.patch";
+  const bytes = "diff --git a/app.js b/app.js\r\n--- a/app.js\n+++ b/app.js\n@@ -1 +0,0 @@\n-cart.push(x)\n";
+  put(root, PATCH, bytes);
+  const proof = {
+    proven: true, reason: "fails on HEAD~1", now: { screenshot: null },
+    without: { method: "base" as const, ref: "HEAD~1", note: null, booted: true, failed: true, message: "", screenshot: null,
+      removal: { file: PATCH, hash: fileHash(join(root, PATCH)), lines: 1 } }
+  };
+  put(root, ".thisisfine/config.json", JSON.stringify({ start: "node server.js" }));
+  put(root, CHECK, "import { test } from '@playwright/test';\ntest('badge', async () => {});\n");
+  put(root, ".thisisfine/promises.jsonl", JSON.stringify(proposal({ proof, checkHash: fileHash(join(root, CHECK)) })) + "\n");
+  run(["hook-prompt"], { cwd: root, home, stdin: { prompt: "y", prompt_id: "pr1", session_id: "s1", transcript_path: "", cwd: root } });
+  assert.equal(readLedger(join(root, ".thisisfine/promises.jsonl")).at(-1)!.kind, "lock");
+
+  rmSync(join(root, PATCH));
+  const blocked = run(["hook-stop"], { cwd: root, home, stdin: { cwd: root } });
+  assert.match(blocked.json().reason, /#1's removal patch was deleted \(\.thisisfine\/proofs\/p1\.patch\)/);
+  const r = run(["restore"], { cwd: root, home });
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /Restored \.thisisfine\/proofs\/p1\.patch \(#1's removal patch\)/);
+  assert.equal(readFileSync(join(root, PATCH), "utf8"), bytes, "byte for byte, CRLF kept");
+  assert.equal(run(["verify"], { cwd: root, home }).code, 0);
+});
+
 test("hook-stop with no locked promises lets the agent stop and shows pending questions", () => {
   const { root, home } = project([proposal()]);
   const r = run(["hook-stop"], { cwd: root, home, stdin: { cwd: root } });

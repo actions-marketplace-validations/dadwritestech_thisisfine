@@ -180,3 +180,10 @@ test("diff markdown: a heading, the lines in a diff fence (so + is green and - i
   assert.match(text, /```diff\n[\s\S]*No promises changed[\s\S]*\n```/);
   assert.match(text.split("```").at(-1)!, /key that isn't in \.thisisfine\/keys\//);
 });
+
+test("status says which promises reprove can't check, and stays quiet when it can check them all", () => {
+  const withPatch: Proof = { ...proven, without: { ...proven.without, removal: { file: ".thisisfine/proofs/p1.patch", hash: "1234123412341234", lines: 3 } } };
+  const recs = [lock({ proof: withPatch }), lock({ proposal: "p2", number: 2, sentence: "Logo links home", proof: proven }), lock({ proposal: "p3", number: 3, sentence: "Old", proof: unproven })];
+  assert.match(statusText(recs), /\n {2}#2 can't be reproved: it was locked before reprove existed\. "thisisfine reprove" says how to fix that\.$/);
+  assert.doesNotMatch(statusText([lock({ proof: withPatch })]), /can't be reproved/);
+});

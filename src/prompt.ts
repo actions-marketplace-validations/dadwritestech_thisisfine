@@ -91,6 +91,14 @@ export function decidePrompt(records: LedgerRecord[], state: State, input: Promp
       refused.push(`#${p.number}'s check changed after it was proposed; ask ${agentName(input.agent)} to propose it again`);
       continue;
     }
+    // Same rule for the removal patch the proof ran: swapped for a no-op
+    // before the "y", the signature would cover a patch that never went red.
+    const removal = p.proof?.without.removal;
+    if (removal && input.hashOf(removal.file) !== removal.hash) {
+      append.push(dismiss(p.id));
+      refused.push(`#${p.number}'s removal patch changed after it was proposed; ask ${agentName(input.agent)} to propose it again`);
+      continue;
+    }
     const rec: LockRecord = {
       kind: "lock", proposal: p.id, number: p.number, sentence: p.sentence, check: p.check,
       checkHash: p.checkHash, proof: p.proof, confirmedAt: input.now, ...confirmation
